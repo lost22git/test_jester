@@ -7,6 +7,7 @@ import std/jsonutils
 import std/oids
 import std/times
 import std/locks
+import std/os
 
 # json serialize/deserialize DateTime
 proc toJsonHook(dt: DateTime, opt = initToJsonOptions()): JsonNode = % $dt
@@ -22,20 +23,63 @@ type Result[T] = object
 proc ok[T](): Result[T] = Result[T](data: none(T), code: 200, errmsg: "")
 proc ok[T](data: T): Result[T] = Result[T](data: some(data), code: 0, errmsg: "")
 proc ok[T](data: Option[T]): Result[T] = Result[T](data: data, code: 0, errmsg: "")
-proc err[T](code: int, errmsg: string): Result[T] = Result[T](data: none(T), code: code, errmsg: errmsg)
+proc err[T](code: int, errmsg: string): Result[T] = Result[T](data: none(T),
+    code: code, errmsg: errmsg)
 
 
-type Fighter = object
+type StartupInfo = object
+  release_mode: bool
+  multi_threads: bool
+  pid: int
+  port: int
+
+proc initStartupInfo(port: int): StartupInfo =
+  when defined(release):
+    const release_mode = true
+  else:
+    const release_mode = false
+
+  when compileOption("threads"):
+    const multi_threads = true
+  else:
+    const multi_threads = false
+
+  result = StartupInfo(
+    release_mode: release_mode,
+    multi_threads: multi_threads,
+    pid: os.getCurrentProcessId(),
+    port: port
+  )
+
+const port = 5000
+let startupInfo = initStartupInfo(port)
+
+echo "Startup info: ", startupInfo
+
+settings:
+  port = Port(port)
+  bindAddr = "127.0.0.1"
+  reusePort = true
+
+
+
+type Fighter = ref object
   id: string
   name: string
   skill: seq[string]
   createdAt: DateTime
+  updatedAt: Option[DateTime] = none(DateTime)
 
 type FighterCreate = object
   name: string
   skill: seq[string]
 
-proc toFighter(a: FighterCreate): Fighter = 
+type FighterEdit = object
+  name: string
+  skill: seq[string]
+
+
+proc toFighter(a: FighterCreate): Fighter =
   return Fighter(
     id: $genOid(),
     name: a.name,
@@ -43,13 +87,10 @@ proc toFighter(a: FighterCreate): Fighter =
     createdAt: now().utc
   )
 
-settings:
-  port = Port(5000)
-  bindAddr = "127.0.0.1"
 
+# var lock: Lock
+# initLock(lock)
 
-var lock: Lock
-initLock(lock)
 var fighters = @[
   Fighter(id: $genOid(), name: "隆", skill: @["波动拳"], createdAt: now().utc),
   Fighter(id: $genOid(), name: "肯", skill: @["升龙拳"], createdAt: now().utc)
@@ -57,32 +98,22 @@ var fighters = @[
 
 const jsonHeader = {"Content-Type": "application/json; charset=utf-8"}
 
-router fighterApi:
+router fighterRouter:
   get "":
     {.cast(gcsafe).}:
-      withLock lock:
+      # withLock lock:
         resp Http200, jsonHeader, $ok(fighters).toJson
 
   get "/@name":
     {.cast(gcsafe).}:
-      withLock lock:
+      # withLock lock:
         let name = decodeUrl(@"name")
-        let found = fighters.filterIt( it.name == name )
+        let found = fighters.filterIt(it.name == name)
         resp Http200, jsonHeader, $ok(found).toJson
-
-  get "/@id/details":
-    {.cast(gcsafe).}:
-      withLock lock:
-        let id = @"id"
-        let found = fighters.filterIt( it.id == id )
-        if found.len > 0:
-          resp Http200, jsonHeader, $ok(found[0]).toJson
-        else:
-          resp Http200, jsonHeader, $ok[Fighter]().toJson
 
   post "":
     {.cast(gcsafe).}:
-      withLock lock:
+      # withLock lock:
         let fighterCreate = try:
             parseJson(request.body).jsonTo(FighterCreate)
           except Exception:
@@ -92,18 +123,32 @@ router fighterApi:
         fighters.add newFighter
         resp Http200, jsonHeader, $ok(newFighter).toJson
 
-
-  delete "/@id":
+  put "":
     {.cast(gcsafe).}:
-      withLock lock:
-        let id = @"id"
-        let found = fighters.filterIt( it.id == id )
-        fighters = fighters.filterIt( it.id != id ) 
+      # withLock lock:
+        let fighterEdit = try:
+            parseJson(request.body).jsonTo(FighterEdit)
+          except Exception:
+            resp Http400, "Bad request body"
+            return
+        let found = fighters.filterIt(it.name == fighterEdit.name)
+        if found.len > 0:
+          found[0].skill = fighterEdit.skill
+          found[0].updatedAt = now().utc.some
+          resp Http200, jsonHeader, $ok(found[0]).toJson
+        else:
+          resp Http200, jsonHeader, $ok[Fighter]().toJson
+
+  delete "/@name":
+    {.cast(gcsafe).}:
+      # withLock lock:
+        let name = decodeUrl(@"name")
+        let found = fighters.filterIt(it.name == name)
+        fighters = fighters.filterIt(it.name != name)
         resp Http200, jsonHeader, $ok(found).toJson
 
 
-
 routes:
-  extend fighterApi, "/fighter"
+  extend fighterRouter, "/fighter"
 
 # TODO: error handle, CORS, DB
