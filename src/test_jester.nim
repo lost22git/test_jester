@@ -1,4 +1,5 @@
 import jester
+import mapster
 import std/sequtils
 import std/uri
 import std/options
@@ -6,8 +7,8 @@ import std/json
 import std/jsonutils
 import std/oids
 import std/times
-import std/locks
 import std/os
+# import std/locks
 
 # json serialize/deserialize DateTime
 proc toJsonHook(dt: DateTime, opt = initToJsonOptions()): JsonNode = % $dt
@@ -78,14 +79,12 @@ type FighterEdit = object
   name: string
   skill: seq[string]
 
+proc toFighter(a: FighterCreate): Fighter {.map.} = 
+  result.id = $genOid()
+  result.createdAt = now().utc
 
-proc toFighter(a: FighterCreate): Fighter =
-  return Fighter(
-    id: $genOid(),
-    name: a.name,
-    skill: a.skill,
-    createdAt: now().utc
-  )
+proc mergeFighter(a: var Fighter, b: FighterEdit) {.inplaceMap.} = 
+  a.updatedAt = now().utc.some
 
 
 # var lock: Lock
@@ -131,10 +130,9 @@ router fighterRouter:
           except Exception:
             resp Http400, "Bad request body"
             return
-        let found = fighters.filterIt(it.name == fighterEdit.name)
+        var found = fighters.filterIt(it.name == fighterEdit.name)
         if found.len > 0:
-          found[0].skill = fighterEdit.skill
-          found[0].updatedAt = now().utc.some
+          mergeFighter(found[0], fighterEdit)
           resp Http200, jsonHeader, $ok(found[0]).toJson
         else:
           resp Http200, jsonHeader, $ok[Fighter]().toJson
