@@ -1,5 +1,6 @@
 import jester
 import mapster
+import stdx/sequtils
 import std/sequtils
 import std/uri
 import std/options
@@ -107,7 +108,7 @@ router fighterRouter:
     {.cast(gcsafe).}:
       # withLock lock:
         let name = decodeUrl(@"name")
-        let found = fighters.filterIt(it.name == name)
+        let found = fighters.findIt(it.name == name)
         resp Http200, jsonHeader, $ok(found).toJson
 
   post "":
@@ -130,10 +131,10 @@ router fighterRouter:
           except Exception:
             resp Http400, "Bad request body"
             return
-        var found = fighters.filterIt(it.name == fighterEdit.name)
-        if found.len > 0:
-          mergeFighter(found[0], fighterEdit)
-          resp Http200, jsonHeader, $ok(found[0]).toJson
+        var found = fighters.findIt(it.name == fighterEdit.name)
+        if found != nil:
+          mergeFighter(found, fighterEdit)
+          resp Http200, jsonHeader, $ok(found).toJson
         else:
           resp Http200, jsonHeader, $ok[Fighter]().toJson
 
@@ -141,7 +142,7 @@ router fighterRouter:
     {.cast(gcsafe).}:
       # withLock lock:
         let name = decodeUrl(@"name")
-        let found = fighters.filterIt(it.name == name)
+        let found = fighters.findIt(it.name == name)
         fighters = fighters.filterIt(it.name != name)
         resp Http200, jsonHeader, $ok(found).toJson
 
