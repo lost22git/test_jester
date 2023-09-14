@@ -1,20 +1,8 @@
 import jester
 import mapster
-import stdx/sequtils
-import std/sequtils
-import std/uri
-import std/options
-import std/json
-import std/jsonutils
-import std/oids
-import std/times
-import std/os
-# import std/locks
-
-# json serialize/deserialize DateTime
-proc toJsonHook(dt: DateTime, opt = initToJsonOptions()): JsonNode = % $dt
-proc fromJsonHook(dt: var DateTime, jsonNode: JsonNode) =
-  dt = jsonNode.getStr().parse("yyyy-MM-dd'T'HH:mm:sszzz", utc())
+import jsony
+import debby/sqlite
+import std/[uri, options, times, os]
 
 
 type Result[T] = object
@@ -53,24 +41,55 @@ proc initStartupInfo(port: int): StartupInfo =
     port: port
   )
 
-const port = 5000
-let startupInfo = initStartupInfo(port)
+# ------ logging -----------------------
 
-echo "Startup info: ", startupInfo
+# addHandler(newConsoleLogger())
 
-settings:
-  port = Port(port)
-  bindAddr = "127.0.0.1"
-  reusePort = true
+# ------ std json ----------------------
+
+# json serialize/deserialize DateTime
+# proc toJsonHook(dt: DateTime, opt = initToJsonOptions()): JsonNode = % $dt
+# proc fromJsonHook(dt: var DateTime, jsonNode: JsonNode) =
+#   dt = jsonNode.getStr().parse("yyyy-MM-dd'T'HH:mm:sszzz", utc())
+
+# ------ jsony -------------------------
+
+proc dumpHook*(s: var string, v: DateTime) =
+  s.add '"'
+  s.add $v
+  s.add '"'
+proc parseHook*(s: string, i: var int, v: var DateTime) =
+  var str: string
+  parseHook(s, i, str)
+  v = parse(str, "yyyy-MM-dd'T'HH:mm:sszzz", utc())
 
 
+
+# ------ orm --------------------------
 
 type Fighter = ref object
-  id: string
+  id: int
   name: string
   skill: seq[string]
   createdAt: DateTime
-  updatedAt: Option[DateTime] = none(DateTime)
+  updatedAt: Option[DateTime] = none DateTime
+
+
+var fighters = @[
+  Fighter(name: "隆", skill: @["波动拳"], createdAt: now().utc),
+  Fighter(name: "肯", skill: @["升龙拳"], createdAt: now().utc)
+]
+
+let db = openDatabase("fighter.db")
+db.dropTableIfExists(Fighter)
+db.createTable(Fighter)
+db.createIndexIfNotExists(Fighter, "name")
+db.withTransaction:
+  db.insert(fighters)
+
+
+
+# ------ model -------------------------
 
 type FighterCreate = object
   name: string
@@ -80,74 +99,77 @@ type FighterEdit = object
   name: string
   skill: seq[string]
 
-proc toFighter(a: FighterCreate): Fighter {.map.} = 
-  result.id = $genOid()
+proc toFighter(a: FighterCreate): Fighter {.map.} =
   result.createdAt = now().utc
 
-proc mergeFighter(a: var Fighter, b: FighterEdit) {.inplaceMap.} = 
+proc mergeFighter(a: var Fighter, b: FighterEdit) {.inplaceMap.} =
   a.updatedAt = now().utc.some
 
 
-# var lock: Lock
-# initLock(lock)
 
-var fighters = @[
-  Fighter(id: $genOid(), name: "隆", skill: @["波动拳"], createdAt: now().utc),
-  Fighter(id: $genOid(), name: "肯", skill: @["升龙拳"], createdAt: now().utc)
-]
+# ------ server ------------------------
+
+const port = 5000
+let startupInfo = initStartupInfo(port)
+echo "Startup info: ", startupInfo
+
+settings:
+  port = Port(port)
+  bindAddr = "127.0.0.1"
+  reusePort = true
 
 const jsonHeader = {"Content-Type": "application/json; charset=utf-8"}
 
 router fighterRouter:
   get "":
     {.cast(gcsafe).}:
-      # withLock lock:
-        resp Http200, jsonHeader, $ok(fighters).toJson
+      let all = db.filter(Fighter, 1 == 1)
+      resp Http200, jsonHeader, ok(all).toJson
 
   get "/@name":
     {.cast(gcsafe).}:
-      # withLock lock:
-        let name = decodeUrl(@"name")
-        let found = fighters.findIt(it.name == name)
-        resp Http200, jsonHeader, $ok(found).toJson
+      let name = decodeUrl(@"name")
+      let found = db.filter(Fighter, it.name == name)
+      resp Http200, jsonHeader, ok(found).toJson
 
   post "":
     {.cast(gcsafe).}:
-      # withLock lock:
-        let fighterCreate = try:
-            parseJson(request.body).jsonTo(FighterCreate)
-          except Exception:
-            resp Http400, "Bad request body"
-            return
-        let newFighter = fighterCreate.toFighter
-        fighters.add newFighter
-        resp Http200, jsonHeader, $ok(newFighter).toJson
+      let fighterCreate = try:
+          request.body.fromJson(FighterCreate)
+        except Exception:
+          resp Http400, "Bad request body"
+          return
+      let newFighter = fighterCreate.toFighter
+      db.withTransaction:
+        db.insert(newFighter)
+      resp Http200, jsonHeader, ok(newFighter).toJson
 
   put "":
     {.cast(gcsafe).}:
-      # withLock lock:
-        let fighterEdit = try:
-            parseJson(request.body).jsonTo(FighterEdit)
-          except Exception:
-            resp Http400, "Bad request body"
-            return
-        var found = fighters.findIt(it.name == fighterEdit.name)
-        if found != nil:
-          mergeFighter(found, fighterEdit)
-          resp Http200, jsonHeader, $ok(found).toJson
-        else:
-          resp Http200, jsonHeader, $ok[Fighter]().toJson
+      let fighterEdit = try:
+          request.body.fromJson(FighterEdit)
+        except Exception:
+          resp Http400, "Bad request body"
+          return
+      var found: seq[Fighter]
+      db.withTransaction:
+        found = db.filter(Fighter, it.name == fighterEdit.name)
+        for v in found.mitems():
+          mergeFighter(v, fighterEdit)
+          db.update(v)
+      resp Http200, jsonHeader, ok(found).toJson
 
   delete "/@name":
     {.cast(gcsafe).}:
-      # withLock lock:
-        let name = decodeUrl(@"name")
-        let found = fighters.findIt(it.name == name)
-        fighters = fighters.filterIt(it.name != name)
-        resp Http200, jsonHeader, $ok(found).toJson
+      let name = decodeUrl(@"name")
+      var found: seq[Fighter]
+      db.withTransaction:
+        found = db.filter(Fighter, it.name == name)
+        db.delete(found)
+      resp Http200, jsonHeader, ok(found).toJson
 
 
 routes:
   extend fighterRouter, "/fighter"
 
-# TODO: error handle, CORS, DB
+# TODO: error handle, CORS
